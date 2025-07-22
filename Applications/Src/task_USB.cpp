@@ -23,12 +23,21 @@ public:
     };
 
     enum class DescriptorType :uint16_t {
-        DEVICE = 0x0100,
-        CONFIGURATION = 0x0200,
-        STRING = 0x0300,
-        INTERFACE = 0x0400,
-        ENDPOINT = 0x0500,
-        DEVICE_QUALIFIER = 0x0600,
+        DEVICE = 0x01,
+        CONFIGURATION = 0x02,
+        STRING = 0x03,
+        INTERFACE = 0x04,
+        ENDPOINT = 0x05,
+        DEVICE_QUALIFIER = 0x06,
+    };
+
+    enum class HIDRequestType :uint8_t {
+        GET_REPORT = 0x01,
+        GET_IDLE = 0x02,
+        GET_PROTOCOL = 0x03,
+        SET_REPORT = 0x09,
+        SET_IDLE = 0x0A,
+        SET_PROTOCOL = 0x0B,
     };
 
     uint8_t device_descriptor[18] = {
@@ -52,48 +61,50 @@ public:
         0x01, // bNumConfigurations (1 configuration)
     };
 
-    uint8_t configure_descriptor[34] = {
-        /* ================= Configuration Descriptor ================= */
-        0x09,                                 // bLength
-        0x02,                                 // bDescriptorType (Configuration)
-        sizeof (configure_descriptor) & 0xFF, // wTotalLength
-        sizeof (configure_descriptor) >> 8,   // wTotalLength
-        0x01,                                 // bNumInterfaces (1 interface)
-        0x01,                                 // bConfigurationValue
-        0x00,                                 // iConfiguration
-        0b1100'0000,                          // bmAttributes
-        0x64,                                 // bMaxPower (200 mA)
+    uint8_t configure_descriptors[1][34] = {
+        {
+            /* ================= Configuration Descriptor ================= */
+            0x09,                                     // bLength
+            0x02,                                     // bDescriptorType (Configuration)
+            sizeof (configure_descriptors[0]) & 0xFF, // wTotalLength
+            sizeof (configure_descriptors[0]) >> 8,   // wTotalLength
+            0x01,                                     // bNumInterfaces (1 interface)
+            0x01,                                     // bConfigurationValue
+            0x00,                                     // iConfiguration
+            0b1100'0000,                              // bmAttributes
+            0x64,                                     // bMaxPower (200 mA)
 
-        /* ================= Interface Descriptor ================= */
-        0x09, // bLength
-        0x04, // bDescriptorType (Interface)
-        0x00, // bInterfaceNumber (Interface 0)
-        0x00, // bAlternateSetting
-        0x01, // bNumEndpoints (1 endpoint)
-        0x03, // bInterfaceClass (Example: CDC class)
-        0x00, // bInterfaceSubClass
-        0x00, // bInterfaceProtocol
-        0b00, // iInterface (Index of Interface String Descriptor)
+            /* ================= Interface Descriptor ================= */
+            0x09, // bLength
+            0x04, // bDescriptorType (Interface)
+            0x00, // bInterfaceNumber (Interface 0)
+            0x00, // bAlternateSetting
+            0x01, // bNumEndpoints (1 endpoint)
+            0x03, // bInterfaceClass (Example: CDC class)
+            0x00, // bInterfaceSubClass
+            0x00, // bInterfaceProtocol
+            0b00, // iInterface (Index of Interface String Descriptor)
 
-        /* ================= HID Descriptor ================= */
-        0x09, // bLength
-        0x21, // bDescriptorType (HID)
-        0x10, // bcdHID (HID version 1.1)
-        0x01, // bcdHID (HID version 1.1)
-        0x21, // bCountryCode (Country code, USA)
-        0x01, // bNumDescriptors (1 HID descriptor)
-        0x22, // bDescriptorType (Report descriptor)
-        0x00, // wDescriptorLength (0 bytes)
-        0x00, // wDescriptorLength (0 bytes)
+            /* ================= HID Descriptor ================= */
+            0x09, // bLength
+            0x21, // bDescriptorType (HID)
+            0x10, // bcdHID (HID version 1.1)
+            0x01, // bcdHID (HID version 1.1)
+            0x21, // bCountryCode (Country code, USA)
+            0x01, // bNumDescriptors (1 HID descriptor)
+            0x22, // bDescriptorType (Report descriptor)
+            0x00, // wDescriptorLength (0 bytes)
+            0x00, // wDescriptorLength (0 bytes)
 
-        /* ================= EndPort Descriptor ================= */
-        0x07, // bLength
-        0x05, // bDescriptorType (Endpoint)
-        0x01, // bEndpointAddress (OUT endpoint 1)
-        0x02, // bmAttributes (Bulk)
-        0x01, // wMaxPacketSize (256 bytes)
-        0x00, // wMaxPacketSize (256 bytes)
-        0xFF, // bInterval
+            /* ================= EndPort Descriptor ================= */
+            0x07, // bLength
+            0x05, // bDescriptorType (Endpoint)
+            0x81, // bEndpointAddress (IN endpoint 1)
+            0x03, // bmAttributes (Interrupt)
+            0x01, // wMaxPacketSize (256 bytes)
+            0x00, // wMaxPacketSize (256 bytes)
+            0x0A, // bInterval
+        }
     };
 };
 
@@ -106,6 +117,8 @@ void StartUSBTask(void *argument) {
     }
 }
 
+uint8_t EP1_RxBuffer[64]; // 端点1接收缓冲区
+
 // 起始帧
 void HAL_PCD_SOFCallback(PCD_HandleTypeDef *hpcd) {}
 // // 控制传输建立阶段
@@ -116,35 +129,68 @@ void HAL_PCD_SetupStageCallback(PCD_HandleTypeDef *hpcd) {
     const uint16_t wIndex = hpcd->Setup[1] & 0x0000FFFF;          // 请求索引
     const uint16_t wLength = (hpcd->Setup[1] & 0xFFFF0000) >> 16; // 请求长度
 
-    switch (static_cast<USB_Device::bRequestType>(bRequest)) {
-        case USB_Device::bRequestType::GET_DESCRIPTOR: {
-            // 获取描述符
-            uint8_t *descriptor = nullptr;
-            uint16_t descriptorLength = 0;
-            switch (static_cast<USB_Device::DescriptorType>(wValue)) {
-                case USB_Device::DescriptorType::DEVICE:
-                    descriptor = My_USB_Device.device_descriptor;
-                    descriptorLength = sizeof(My_USB_Device.device_descriptor);
+    switch ((bRequestType & 0b0110'0000) >> 5) {
+        case 0:
+            // 标准请求
+            switch (static_cast<USB_Device::bRequestType>(bRequest)) {
+                case USB_Device::bRequestType::GET_DESCRIPTOR: {
+                    // 获取描述符
+                    uint8_t *descriptor = nullptr;
+                    uint16_t descriptorLength = 0;
+                    switch (static_cast<USB_Device::DescriptorType>(wValue >> 8)) {
+                        case USB_Device::DescriptorType::DEVICE:
+                            descriptor = My_USB_Device.device_descriptor;
+                            descriptorLength = sizeof(My_USB_Device.device_descriptor);
+                            break;
+                        case USB_Device::DescriptorType::CONFIGURATION:
+                            descriptor = My_USB_Device.configure_descriptors[wValue & 0xFF];
+                            descriptorLength = sizeof(My_USB_Device.configure_descriptors[wValue & 0xFF]);
+                            break;
+                        case USB_Device::DescriptorType::DEVICE_QUALIFIER:
+                            HAL_PCD_EP_SetStall(hpcd, 0x80); // 设置端点为STALL状态
+                            HAL_PCD_EP_SetStall(hpcd, 0x00); // 设置端点为STALL状态
+                            break;
+                        default:
+                            break;
+                    }
+                    if (descriptor != nullptr)
+                        HAL_PCD_EP_Transmit(hpcd, 0x80, descriptor, std::min(wLength, descriptorLength));
                     break;
-                case USB_Device::DescriptorType::CONFIGURATION:
-                    descriptor = My_USB_Device.configure_descriptor;
-                    descriptorLength = sizeof(My_USB_Device.configure_descriptor);
+                }
+                case USB_Device::bRequestType::SET_ADDRESS: // 设置地址
+                    HAL_PCD_EP_Transmit(hpcd, 0x80, nullptr, 0);
+                    // TODO: 应该改成发送成功后再设置地址
+                    HAL_PCD_SetAddress(hpcd, wValue); // 设置设备地址
                     break;
-                case USB_Device::DescriptorType::DEVICE_QUALIFIER:
-                    HAL_PCD_EP_SetStall(hpcd, 0x80); // 设置端点为STALL状态
-                    HAL_PCD_EP_SetStall(hpcd, 0x00); // 设置端点为STALL状态
+                case USB_Device::bRequestType::SET_CONFIGURATION:
+                    // TODO: 本应用只有一种配置,故没做其他处理
+                    // HAL_PCD_EP_Open(hpcd, 0x01, 64, EP_TYPE_BULK); // 打开端点1
+                    HAL_PCD_EP_Open(hpcd, 0x81, 64, EP_TYPE_INTR); // 打开端点1
+                    HAL_PCD_EP_Transmit(hpcd, 0x80, nullptr, 0);
+                    break;
+                case USB_Device::bRequestType::GET_INTERFACE:
+                    // TODO: ?
                     break;
                 default:
                     break;
             }
-            if (descriptor != nullptr)
-                HAL_PCD_EP_Transmit(hpcd, 0x80, descriptor, std::min(wLength, descriptorLength));
             break;
-        }
-        case USB_Device::bRequestType::SET_ADDRESS: // 设置地址
-            HAL_PCD_EP_Transmit(hpcd, 0x00, nullptr, 0);
-            // TODO: 应该改成成功发送后再设置地址
-            HAL_PCD_SetAddress(hpcd, wValue); // 设置设备地址
+        case 1:
+            // 类请求
+            switch (static_cast<USB_Device::HIDRequestType>(bRequest)) {
+                case USB_Device::HIDRequestType::SET_IDLE:
+                    HAL_PCD_EP_Transmit(hpcd, 0x80, nullptr, 0);
+                    break;
+                case USB_Device::HIDRequestType::GET_REPORT:
+                    // TODO: ?
+                    break;
+                default:
+                    break;
+            }
+            break;
+        case 2:
+            // 厂商请求
+            // TODO: ?
             break;
         default:
             break;
